@@ -18,9 +18,15 @@
     <ClInclude Include="..\src\wallpuncher.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\win32_tun.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\wallpuncher.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\win32_tun.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

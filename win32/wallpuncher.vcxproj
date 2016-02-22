@@ -79,9 +79,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\src\wallpuncher.h" />
+    <ClInclude Include="..\src\win32_tun.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\wallpuncher.cpp" />
+    <ClCompile Include="..\src\win32_tun.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
