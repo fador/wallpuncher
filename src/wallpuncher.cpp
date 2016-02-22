@@ -168,8 +168,8 @@ static void event_loop(HANDLE device)
 		if (packetlen > 0 && overlapped_write.hEvent == INVALID_HANDLE_VALUE)
 		{
       
-      if (packet_read[0] & 0xf0 == 0x40) {
-
+      if ((uint8_t)(packet_read[0] & 0xf0) == 0x40) {
+        /*
         if(MATCH_IP(&packet_read[16], &correctIp)) {
           for (int i = 0; i< 4; ++i) {
               byte tmp = packet_read[12+i]; packet_read[12+i] = packet_read[16+i]; packet_read[16+i] = tmp;
@@ -187,6 +187,7 @@ static void event_loop(HANDLE device)
 			    else if (GetLastError() != ERROR_IO_PENDING)
 				    winerror("Unable to write packet");
         }
+        */
       }
       packetlen = 0;
 		}
@@ -199,7 +200,7 @@ static void event_loop(HANDLE device)
 			overlapped_read.hEvent = event_read;
 			if (ReadFile(device, packet_read, sizeof packet_read, &packetlen, &overlapped_read) != 0)
 			{
-        if (packetlen > 0 && packet_read[0] & 0xf0 == 0x40)
+        if (packetlen > 0 && (uint8_t)(packet_read[0] & 0xf0) == 0x40)
         {
           if(MATCH_IP(&packet_read[16], &correctIp)) {
             std::cout << "Read bytes: " << packetlen << std::endl;
@@ -232,11 +233,11 @@ static void event_loop(HANDLE device)
      
       
 			//printf("Successfully read one packet of size %d\n", packetlen);
-      if (packetlen > 0 && packet_read[0] & 0xf0 == 0x40) {
+      if (packetlen > 0 && (uint8_t)(packet_read[0] & 0xf0) == 0x40) {
         printf("Protocol ver: %x\n", packet_read[0]);
         printf("Src ip: %d.%d.%d.%d\n", (unsigned char)packet_read[12], (unsigned char)packet_read[13], (unsigned char)packet_read[14], (unsigned char)packet_read[15]);
         printf("Dst ip: %d.%d.%d.%d\n", (unsigned char)packet_read[16], (unsigned char)packet_read[17], (unsigned char)packet_read[18], (unsigned char)packet_read[19]);
-        if(MATCH_IP(&packet_read[16], &correctIp)) {
+        if(MATCH_IP(&packet_read[16], (uint8_t*)&correctIp)) {
           std::cout << "Read bytes: " << packetlen << std::endl;
           FILE *outfp = fopen("output.bin", "ab+");
           fwrite(packet_read, packetlen, 1, outfp);
