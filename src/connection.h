@@ -136,8 +136,8 @@ public:
 
   bool resendSent(std::vector<Connection::sentFrame> &toNet) {
     std::unique_lock<std::mutex> outputLock(outputMutex);
-    for (auto frame : sentFrames) {
-      if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame.sent).count() > 200) {
+    for (auto &frame : sentFrames) {
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() - frame.sent).count() > 0.200) {
         toNet.push_back(frame);
         frame.sent = std::chrono::steady_clock::now();
       }
