@@ -54,6 +54,18 @@
 #include "tap-windows.h"
 #include "connection.h"
 
+uint32_t hexToByte(char hex)
+{
+  if (hex >= '0' && hex <= '9')
+    return hex - '0';
+  if (hex >= 'a' && hex <= 'f')
+    return 10+(hex - 'a');
+  if (hex >= 'A' && hex <= 'F')
+    return 10+(hex - 'A');
+
+  return 0;
+}
+
 #define MATCH_IP(data, ip) (((data)[0] == (ip)[0] && (data)[1] == (ip)[1] && (data)[2] == (ip)[2] && (data)[3] == (ip)[3]))
 
 #define CONNECTIONHEADERS 16
@@ -65,13 +77,34 @@ static void syncRead(Connection* conn)
 	char packet[INPUTBUFLEN];
 	DWORD packetlen;
   HANDLE device = conn->getDevice();
+
   while (1) {
-	  printf("Reading one packet\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    OVERLAPPED overlapped = {0};
+		overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+		if (ReadFile(device, packet, sizeof(packet), &packetlen, &overlapped) == 0)
+		{
+      if (GetLastError() != ERROR_IO_PENDING) {
+				return;
+      }
+			if (WaitForSingleObject(overlapped.hEvent, INFINITE) != WAIT_OBJECT_0) {
+        CloseHandle(overlapped.hEvent);
+				continue;
+      }
+			if (GetOverlappedResult(device, &overlapped, &packetlen, FALSE) == 0)
+				return;
+		}
+		CloseHandle(overlapped.hEvent);
+
+
+	  //printf("Reading one packet\n");
+    /*
     if (ReadFile(device, packet, INPUTBUFLEN, &packetlen, NULL) == 0) {
       printf("Error reading packet!");
       return;
-    }
-    if (conn->established) {
+    }*/
+    //printf("Done reading packet\n");
+    if (conn->established && packetlen) {
       Connection::sentFrame frame;
       frame.data = new uint8_t[packetlen+CONNECTIONHEADERS];
       frame.dataLen = packetlen+CONNECTIONHEADERS;
@@ -84,6 +117,7 @@ static void syncRead(Connection* conn)
       memcpy(&frame.data[CONNECTIONHEADERS], packet, packetlen);
       conn->addSent(frame);
     }
+    
   }
 }
 
@@ -103,22 +137,26 @@ static void syncReadSocket(Connection* conn)
       Connection::receivedFrame frame;
       frame.frame = ntohs(*((uint16_t*)(&buf[1])));
       switch(buf[0]) {
-        case TYPE_FRAME:          
-          if (frame.frame < conn->getInFrame()) {            
+        case TYPE_FRAME:
+          printf("Got FRAME %d\n",frame.frame);
+          conn->sendAck(frame.frame);
+          if (frame.frame < conn->getInFrame()) {
+            printf("Old frame..%d < %d\n", frame.frame, conn->getInFrame());
             continue;
           }
-          frame.dataLen = ntohs(*((uint16_t*)(&buf[3])));
-          
+          frame.dataLen = ntohs(*((uint16_t*)(&buf[3])));          
           frame.data = new uint8_t[frame.dataLen];          
           memcpy(frame.data, &buf[CONNECTIONHEADERS], frame.dataLen);
           conn->addReceived(frame);
-          conn->sendAck(frame.frame);
+          
           break;
         case TYPE_PING:
+          printf("Got PING\n");
           conn->ping();
         break;
         case TYPE_ACK:
           conn->ack(frame.frame);
+          printf("Got ACK\n");
         break;
         default:
           printf("Invalid packet of type %d!\n", buf[0]);
@@ -141,18 +179,38 @@ static bool doWriting(Connection* conn) {
   char buf[CONNECTIONHEADERS];
 
   if (conn->established) {
+    
     conn->sendReceivedToLocal(toLocalNet);
-
     for (auto frame : toLocalNet) {
+      DWORD out;
+      printf("Writing to local net..%d\n", frame.dataLen);
+      /*
 	    if (WriteFile(device, frame.data, frame.dataLen, &writelen, NULL) == 0) {
         printf("Error writing a packet!");
         return false;
-      }
+      }*/
+      OVERLAPPED overlapped = {0};
+		  overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+		  DWORD writelen;
+		  if (WriteFile(device, frame.data, frame.dataLen, &writelen, &overlapped) == 0)
+		  {
+			  if (GetLastError() != ERROR_IO_PENDING)
+				  return false;
+			  if (WaitForSingleObject(overlapped.hEvent, INFINITE) != WAIT_OBJECT_0)
+				  return false;
+			  if (GetOverlappedResult(device, &overlapped, &writelen, FALSE) == 0)
+				  return false;
+		  }
+		  CloseHandle(overlapped.hEvent);
+
       delete []frame.data;
+      printf("Written to local net %d\n", writelen);
     }
+    
 
     conn->resendSent(toNet);
     for (auto frame : toNet) {
+      printf("Sending to net..\n");
       if (sendto(fd, (const char *)frame.data, frame.dataLen, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
         std::cerr << "Send failure" << std::endl;
         return false;
@@ -160,6 +218,7 @@ static bool doWriting(Connection* conn) {
     }
     conn->getAcks(toAck);
     for (uint32_t frame : toAck) {
+      printf("Sending ACK %d..\n", frame);
       buf[0] = TYPE_ACK;
       *((uint16_t*)(&buf[1])) = htons(frame);
       *((uint16_t*)(&buf[3])) = htons(0);
@@ -171,7 +230,7 @@ static bool doWriting(Connection* conn) {
   }
 
   
-  buf[0] = TYPE_FRAME;
+  buf[0] = TYPE_PING;
   *((uint16_t*)(&buf[1])) = htons(0);
   *((uint16_t*)(&buf[3])) = htons(0);
   //Send ping
@@ -192,8 +251,77 @@ static void timer(Connection* conn) {
   }
 }
 
+
+static void usage(std::string name)
+{
+    std::cerr << "Usage: " << name << " <options>"
+              << "Options:"  << std::endl
+              << "  -h,--help: this help" << std::endl
+              << "  -i,--port-in <port> : input port to use"  << std::endl
+              << "  -o,--port-out <port> : remote port to connect"  << std::endl
+              << "  -a,--addr <ip> : remote ip to connect"  << std::endl
+              << std::endl;
+}
+
 int main(int argc, char* argv[]) {
   
+  // Local and destination ip
+  const std::string ipLocal = "0.0.0.0";
+  std::string ipRemote = "";
+  
+  int portOut = 0;
+  int portIn = 0;
+  DWORD localIp = 0;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if ((arg == "-h") || (arg == "--help")) {
+      usage(argv[0]);
+      return 0;
+    } else if ((arg == "-o") || (arg == "--port-out")) {
+      if (i + 1 < argc) {
+          portOut = atoi(argv[++i]);
+      } else {
+        std::cerr << "--port-out option requires one argument." << std::endl;
+        return EXIT_FAILURE;
+      }
+    } else if ((arg == "-i") || (arg == "--port-in")) {
+      if (i + 1 < argc) {
+        portIn = atoi(argv[++i]);
+      } else {
+        std::cerr << "--port-in option requires one argument." << std::endl;
+        return EXIT_FAILURE;
+      }  
+    } else if ((arg == "-a") || (arg == "--addr")) {
+      if (i + 1 < argc) {
+        ipRemote = std::string(argv[++i]);
+      } else {
+        std::cerr << "--addr option requires one argument." << std::endl;
+        return EXIT_FAILURE;
+      }  
+    } else if ((arg == "-l") || (arg == "--local-ip")) {
+      if (i + 1 < argc) {
+        std::string ip = argv[++i];
+        for (int ii = 0; ii < 4; ii++) {
+          localIp |= ((hexToByte(ip[ii*2])<<4)+hexToByte(ip[ii*2+1]))<<(8*(3-ii));
+        }
+      } else {
+        std::cerr << "--local-ip option requires one argument." << std::endl;
+        return EXIT_FAILURE;
+      }  
+    }
+
+    
+  }
+
+  if (portOut == 0 || portIn == 0 || ipRemote == "") {
+    std::cerr << portOut << " " << portIn << " " << ipRemote << std::endl;
+    usage(argv[0]);
+    return EXIT_FAILURE;
+  }
+
+  printf("Local ip %x\n",localIp);
+
   // Input/output buffer
   std::string guid = "";
   int fd;
@@ -213,7 +341,7 @@ int main(int argc, char* argv[]) {
 	HANDLE fp= CreateFile(std::wstring(device.begin(), device.end()).c_str(),GENERIC_READ | GENERIC_WRITE,0,
                         NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, NULL);
 
-  conn.setDevice(fp);
+
 	DWORD readlen;
   DWORD code = 1;
 
@@ -222,18 +350,9 @@ int main(int argc, char* argv[]) {
   
 
 	DeviceIoControl (fp, TAP_WIN_IOCTL_SET_MEDIA_STATUS, &code, 4, &code, 4, (LPDWORD)&readlen, NULL);
-  DWORD code2[3] = {0x0100030a, 0x0000030a, 0x00ffffff};
+  DWORD code2[3] = {localIp /*0x0100030a*/, 0x0000030a, 0x00ffffff};
 	DeviceIoControl (fp, TAP_WIN_IOCTL_CONFIG_TUN, code2, 12,	code2, 12, (LPDWORD)&readlen, NULL);
 
-  DWORD bytesRead = 0;
-  #define COPYBUFFERSIZE 4096
-  BYTE   buffer[COPYBUFFERSIZE] = { 0 };
-
-  // Local and destination ip
-  const std::string ipLocal = "0.0.0.0";
-  const std::string ipRemote = "146.185.175.121";
-  
-  const int port = 10001;
 
   // Initialize winsock
 #ifdef WIN32
@@ -262,7 +381,7 @@ int main(int argc, char* argv[]) {
   memset(&addr_src, 0, sizeof(addr_src));
   addr_src.sin_family      = AF_INET;
   addr_src.sin_addr.s_addr = inet_addr(ipLocal.c_str());
-  addr_src.sin_port        = htons(port);
+  addr_src.sin_port        = htons(portIn);
 
   // Bind source port
   if (bind(fd, (sockaddr*)&addr_src, sizeof(addr_src)) < 0)  {
@@ -273,13 +392,26 @@ int main(int argc, char* argv[]) {
   // Set destination port and host
   memset(&addr_dst, 0, sizeof(addr_dst));
   addr_dst.sin_family = AF_INET;
-  addr_dst.sin_port = htons(port);
+  addr_dst.sin_port = htons(portOut);
   addr_dst.sin_addr.s_addr = inet_addr(ipRemote.c_str());
 
+
+
+  
+  COMMTIMEOUTS cto;
+  SecureZeroMemory(&cto, sizeof(COMMTIMEOUTS));
+  // Set the new timeouts
+  cto.ReadIntervalTimeout = MAXDWORD;
+  cto.ReadTotalTimeoutConstant = 0;
+  cto.ReadTotalTimeoutMultiplier = 0;
+  if (!SetCommTimeouts(fp, &cto)) {
+    std::cout << "SetCommTimeouts failed!" << std::endl;
+  }
 
   conn.addr_src = addr_src;
   conn.addr_dst = addr_dst;
 
+  conn.setDevice(fp);
   conn.setSocket(fd);
 
   std::thread readThread(syncRead, &conn);

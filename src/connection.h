@@ -49,6 +49,13 @@ public:
     int i;
 
     for (i = 0; i < receivedFrames.size(); i++) {
+      if (receivedFrames[i].frame == newFrame.frame) {
+        delete [] receivedFrames[i].data;
+        return true;
+      }
+    }
+
+    for (i = 0; i < receivedFrames.size(); i++) {
       if (receivedFrames[i].frame > newFrame.frame) {
         break;
       }
@@ -102,6 +109,7 @@ public:
     for (uint32_t ack : toAck) {
       ackOut.push_back(ack);
     }
+    toAck.clear();
 
     return true;
   }
@@ -128,7 +136,7 @@ public:
   bool resendSent(std::vector<Connection::sentFrame> &toNet) {
     std::unique_lock<std::mutex> outputLock(outputMutex);
     for (auto frame : sentFrames) {
-      if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame.sent).count() > 200) {
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame.sent).count() > std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::milliseconds(200)).count()) {
         toNet.push_back(frame);
         frame.sent = std::chrono::steady_clock::now();
       }
@@ -156,6 +164,7 @@ public:
   }
 
   void ping() {
+    if (!established) std::cerr << "Connection established!!" << std::endl;
     established = true;
   }
 
