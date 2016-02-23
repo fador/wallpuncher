@@ -78,8 +78,7 @@ static void syncRead(Connection* conn)
 	DWORD packetlen;
   HANDLE device = conn->getDevice();
 
-  while (1) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  while (1) {    
     OVERLAPPED overlapped = {0};
 		overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
 		if (ReadFile(device, packet, sizeof(packet), &packetlen, &overlapped) == 0)
@@ -151,7 +150,7 @@ static void syncReadSocket(Connection* conn)
           
           break;
         case TYPE_PING:
-          printf("Got PING\n");
+          //printf("Got PING\n");
           conn->ping();
         break;
         case TYPE_ACK:
@@ -160,6 +159,7 @@ static void syncReadSocket(Connection* conn)
         break;
         default:
           printf("Invalid packet of type %d!\n", buf[0]);
+          return;
       }
     } else {
       printf("Recv failed!\n");
@@ -210,7 +210,7 @@ static bool doWriting(Connection* conn) {
 
     conn->resendSent(toNet);
     for (auto frame : toNet) {
-      printf("Sending to net..\n");
+      printf("Sending to net..%d\n", frame.frame);
       if (sendto(fd, (const char *)frame.data, frame.dataLen, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
         std::cerr << "Send failure" << std::endl;
         return false;
@@ -244,7 +244,7 @@ static bool doWriting(Connection* conn) {
 
 static void timer(Connection* conn) {
   while (1) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     if (!doWriting(conn)) {
       return;
     }

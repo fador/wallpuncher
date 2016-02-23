@@ -50,7 +50,7 @@ public:
 
     for (i = 0; i < receivedFrames.size(); i++) {
       if (receivedFrames[i].frame == newFrame.frame) {
-        delete [] receivedFrames[i].data;
+        delete [] newFrame.data;
         return true;
       }
     }
@@ -65,6 +65,7 @@ public:
     } else {
       receivedFrames.insert(receivedFrames.begin()+i, newFrame);
     }
+
     return true;
   }
 
@@ -136,7 +137,7 @@ public:
   bool resendSent(std::vector<Connection::sentFrame> &toNet) {
     std::unique_lock<std::mutex> outputLock(outputMutex);
     for (auto frame : sentFrames) {
-      if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame.sent).count() > std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::milliseconds(200)).count()) {
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - frame.sent).count() > 200) {
         toNet.push_back(frame);
         frame.sent = std::chrono::steady_clock::now();
       }
