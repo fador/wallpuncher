@@ -29,6 +29,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <mutex>
 
 #ifdef  _WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
@@ -50,227 +52,149 @@
 
 #include "win32_tun.h"
 #include "tap-windows.h"
+#include "connection.h"
 
-static void winerror(const char* message)
+#define MATCH_IP(data, ip) (((data)[0] == (ip)[0] && (data)[1] == (ip)[1] && (data)[2] == (ip)[2] && (data)[3] == (ip)[3]))
+
+#define CONNECTIONHEADERS 16
+enum { TYPE_FRAME = 1, TYPE_PING = 2, TYPE_ACK = 3 };
+
+static void syncRead(Connection* conn)
 {
-	int err = GetLastError();
-	fprintf(stderr, "%s: (%d) ", message, err);
-
-	char buf[1024];
-	if (!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (wchar_t*)buf, sizeof buf, NULL))
-		strncpy_s(buf, sizeof(buf), "(unable to format errormessage)", _TRUNCATE);
-	fprintf(stderr, "%s", buf);
-
-	exit(1);
-}
-
-
-
-static void sync(HANDLE device)
-{
-	char packet[1518];
+  #define INPUTBUFLEN 1518
+	char packet[INPUTBUFLEN];
 	DWORD packetlen;
+  HANDLE device = conn->getDevice();
   while (1) {
 	  printf("Reading one packet\n");
-	  if (ReadFile(device, packet, sizeof packet, &packetlen, NULL) == 0)
-		  winerror("Unable to read packet");
-    if (packet[0] == 0x40) {
-      printf("Successfully read one packet of size %d\n", packetlen);
-      
-      for (int i = 0; i< 4; ++i) {
-          byte tmp = packet[12+i]; packet[12+i] = packet[16+i]; packet[16+i] = tmp;
-      }
-	    
-      
-	    printf("Writing the packet back\n");
-	    DWORD writelen;
-	    if (WriteFile(device, packet, packetlen, &writelen, NULL) == 0)
-		    winerror("Unable to write packet");
-	    printf("Successfully wrote %d bytes\n", writelen);
-      
+    if (ReadFile(device, packet, INPUTBUFLEN, &packetlen, NULL) == 0) {
+      printf("Error reading packet!");
+      return;
+    }
+    if (conn->established) {
+      Connection::sentFrame frame;
+      frame.data = new uint8_t[packetlen+CONNECTIONHEADERS];
+      frame.dataLen = packetlen+CONNECTIONHEADERS;
+      frame.frame = conn->getIncOutFrame();
+	  
+      frame.data[0] = TYPE_FRAME;
+      *((uint16_t*)(&frame.data[1])) = htons(frame.frame);
+      *((uint16_t*)(&frame.data[3])) = htons(packetlen);
+
+      memcpy(&frame.data[CONNECTIONHEADERS], packet, packetlen);
+      conn->addSent(frame);
     }
   }
 }
 
-static void async(HANDLE device)
+static void syncReadSocket(Connection* conn)
 {
-	char packet[1518];
-  char writepacket[1518];
-	DWORD packetlen;
-  while (1) {
-	  {
-		  printf("Reading one packet\n");
-		  OVERLAPPED overlapped = {0};
-		  overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-		  if (ReadFile(device, packet, sizeof packet, &packetlen, &overlapped) == 0)
-		  {
-			  if (GetLastError() != ERROR_IO_PENDING)
-				  winerror("Unable to read packet");
-			  printf("Waiting for read event\n");
-			  if (WaitForSingleObject(overlapped.hEvent, INFINITE) != WAIT_OBJECT_0)
-				  winerror("Unable to wait on read event");
-			  printf("Done waiting for read event, getting overlapped status\n");
-			  if (GetOverlappedResult(device, &overlapped, &packetlen, FALSE) == 0)
-				  winerror("Unable to get overlapped result");
-		  }
-		  printf("Successfully read one packet of size %d\n", packetlen);
-		  CloseHandle(overlapped.hEvent);
-	  }
+  #define BUFLEN 1024
+  char buf[BUFLEN];
+  int len;
+  int fd = conn->getSocket();
+  int structLen = sizeof(sockaddr);
 
-	  {
-		  printf("Writing the packet back\n");
-		  OVERLAPPED overlapped = {0};
-		  overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-		  DWORD writelen;
-      for (int i = 0; i< 4; ++i) {
-          byte tmp = packet[12+i]; packet[12+i] = packet[16+i]; packet[16+i] = tmp;
+  while (1) {
+    len = recvfrom(fd, buf, BUFLEN, 0, (sockaddr *)&conn->addr_dst, &structLen);
+
+    // If data is received, print some info of it
+    if (len > 0) {
+      Connection::receivedFrame frame;
+      frame.frame = ntohs(*((uint16_t*)(&buf[1])));
+      switch(buf[0]) {
+        case TYPE_FRAME:          
+          if (frame.frame < conn->getInFrame()) {            
+            continue;
+          }
+          frame.dataLen = ntohs(*((uint16_t*)(&buf[3])));
+          
+          frame.data = new uint8_t[frame.dataLen];          
+          memcpy(frame.data, &buf[CONNECTIONHEADERS], frame.dataLen);
+          conn->addReceived(frame);
+          conn->sendAck(frame.frame);
+          break;
+        case TYPE_PING:
+          conn->ping();
+        break;
+        case TYPE_ACK:
+          conn->ack(frame.frame);
+        break;
+        default:
+          printf("Invalid packet of type %d!\n", buf[0]);
       }
-      memcpy(writepacket, packet, packetlen);
-		  if (WriteFile(device, writepacket, packetlen, &writelen, &overlapped) == 0)
-		  {
-			  if (GetLastError() != ERROR_IO_PENDING)
-				  winerror("Unable to write packet");
-			  printf("Waiting for write event\n");
-			  if (WaitForSingleObject(overlapped.hEvent, INFINITE) != WAIT_OBJECT_0)
-				  winerror("Unable to wait on write event");
-			  printf("Done waiting for write event, getting overlapped status\n");
-			  if (GetOverlappedResult(device, &overlapped, &writelen, FALSE) == 0)
-				  winerror("Unable to get overlapped result");
-		  }
-		  printf("Successfully wrote %d bytes\n", writelen);
-		  CloseHandle(overlapped.hEvent);
-	  }
+    } else {
+      printf("Recv failed!\n");
+      return;
+    }
   }
 }
 
-#define MATCH_IP(data, ip) (((data)[0] == (ip)[0] && (data)[1] == (ip)[1] && (data)[2] == (ip)[2] && (data)[3] == (ip)[3]))
+static bool doWriting(Connection* conn) {
+  HANDLE device = conn->getDevice();
+  int fd = conn->getSocket();
+  DWORD writelen;
+  int structLen = sizeof(sockaddr);
+  std::vector<Connection::receivedFrame> toLocalNet;
+  std::vector<Connection::sentFrame> toNet;
+  std::vector<uint32_t> toAck;
+  char buf[CONNECTIONHEADERS];
 
-static void event_loop(HANDLE device)
-{
-	char packet_read[1518];
-	char packet_write[1518];
-	DWORD packetlen = 0;
-	DWORD writelen;
-	HANDLE event_read = CreateEvent(NULL, FALSE, FALSE, NULL);
-	HANDLE event_write = CreateEvent(NULL, FALSE, FALSE, NULL);
-	OVERLAPPED overlapped_read = {0};
-	OVERLAPPED overlapped_write = {0};
+  if (conn->established) {
+    conn->sendReceivedToLocal(toLocalNet);
 
+    for (auto frame : toLocalNet) {
+	    if (WriteFile(device, frame.data, frame.dataLen, &writelen, NULL) == 0) {
+        printf("Error writing a packet!");
+        return false;
+      }
+      delete []frame.data;
+    }
+
+    conn->resendSent(toNet);
+    for (auto frame : toNet) {
+      if (sendto(fd, (const char *)frame.data, frame.dataLen, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
+        std::cerr << "Send failure" << std::endl;
+        return false;
+      }
+    }
+    conn->getAcks(toAck);
+    for (uint32_t frame : toAck) {
+      buf[0] = TYPE_ACK;
+      *((uint16_t*)(&buf[1])) = htons(frame);
+      *((uint16_t*)(&buf[3])) = htons(0);
+      if (sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
+        std::cerr << "Send failure" << std::endl;
+        return false;
+      }
+    }
+  }
+
+  
+  buf[0] = TYPE_FRAME;
+  *((uint16_t*)(&buf[1])) = htons(0);
+  *((uint16_t*)(&buf[3])) = htons(0);
+  //Send ping
+  if (sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
+    std::cerr << "Send failure" << std::endl;
+    return false;
+  }
+
+  return true;
+}
+
+static void timer(Connection* conn) {
   while (1) {
-  HANDLE event_read = CreateEvent(NULL, FALSE, FALSE, NULL);
-	HANDLE event_write = CreateEvent(NULL, FALSE, FALSE, NULL);
-	overlapped_read.hEvent = INVALID_HANDLE_VALUE;
-	overlapped_write.hEvent = INVALID_HANDLE_VALUE;
-  uint32_t correctIp = 0x0a030005;
-  correctIp = htonl(correctIp);
-	for (;;)
-	{
-		if (packetlen > 0 && overlapped_write.hEvent == INVALID_HANDLE_VALUE)
-		{
-      
-      if ((uint8_t)(packet_read[0] & 0xf0) == 0x40) {
-        /*
-        if(MATCH_IP(&packet_read[16], &correctIp)) {
-          for (int i = 0; i< 4; ++i) {
-              byte tmp = packet_read[12+i]; packet_read[12+i] = packet_read[16+i]; packet_read[16+i] = tmp;
-          }
-			    printf("Writing the packet back\n");
-			    memcpy(packet_write, packet_read, packetlen);
-			    memset(&overlapped_write, 0, sizeof overlapped_write);
-			    overlapped_write.hEvent = event_write;
-			    if (WriteFile(device, packet_write, packetlen, &writelen, &overlapped_write) != 0)
-			    {
-				    printf("Successfully wrote %d bytes\n", writelen);
-            packetlen = 0;
-				    break;
-			    }
-			    else if (GetLastError() != ERROR_IO_PENDING)
-				    winerror("Unable to write packet");
-        }
-        */
-      }
-      packetlen = 0;
-		}
-
-		if (overlapped_read.hEvent == INVALID_HANDLE_VALUE)
-		{
-			//printf("Reading one packet\n");
-			packetlen = 0;
-			memset(&overlapped_read, 0, sizeof overlapped_read);
-			overlapped_read.hEvent = event_read;
-			if (ReadFile(device, packet_read, sizeof packet_read, &packetlen, &overlapped_read) != 0)
-			{
-        if (packetlen > 0 && (uint8_t)(packet_read[0] & 0xf0) == 0x40)
-        {
-          if(MATCH_IP(&packet_read[16], &correctIp)) {
-            std::cout << "Read bytes: " << packetlen << std::endl;
-            FILE *outfp = fopen("output.bin", "ab+");
-            fwrite(packet_read, packetlen, 1, outfp);
-            fclose(outfp);
-          }
-        }
-				//printf("Successfully read one packet of size %d\n", packetlen);
-				overlapped_read.hEvent = INVALID_HANDLE_VALUE;
-				continue;
-			}
-			else if (GetLastError() != ERROR_IO_PENDING)
-				winerror("Unable to read packet");
-		}
-
-		printf("Waiting for events\n");
-		HANDLE events[] = { event_read, event_write };
-		const size_t event_count = sizeof(events) / sizeof(HANDLE);
-		DWORD result = WaitForMultipleObjects(event_count, events, FALSE, INFINITE);
-		if (result < WAIT_OBJECT_0 || result >= WAIT_OBJECT_0 + event_count)
-			winerror("Unable to wait for multiple objects");
-		result -= WAIT_OBJECT_0;
-
-		if (events[result] == event_read)
-		{
-			//printf("Read event fired, getting overlapped results\n");
-			if (GetOverlappedResult(device, &overlapped_read, &packetlen, FALSE) == 0)
-				winerror("Unable to get overlapped result");
-     
-      
-			//printf("Successfully read one packet of size %d\n", packetlen);
-      if (packetlen > 0 && (uint8_t)(packet_read[0] & 0xf0) == 0x40) {
-        printf("Protocol ver: %x\n", packet_read[0]);
-        printf("Src ip: %d.%d.%d.%d\n", (unsigned char)packet_read[12], (unsigned char)packet_read[13], (unsigned char)packet_read[14], (unsigned char)packet_read[15]);
-        printf("Dst ip: %d.%d.%d.%d\n", (unsigned char)packet_read[16], (unsigned char)packet_read[17], (unsigned char)packet_read[18], (unsigned char)packet_read[19]);
-        if(MATCH_IP(&packet_read[16], (uint8_t*)&correctIp)) {
-          std::cout << "Read bytes: " << packetlen << std::endl;
-          FILE *outfp = fopen("output.bin", "ab+");
-          fwrite(packet_read, packetlen, 1, outfp);
-          fclose(outfp);
-        }
-      }
-			overlapped_read.hEvent = INVALID_HANDLE_VALUE;
-		}
-
-		if (events[result] == event_write)
-		{
-			printf("Write event fired, getting overlapped results\n");
-			if (GetOverlappedResult(device, &overlapped_write, &writelen, FALSE) == 0)
-				winerror("Unable to get overlapped result");
-			printf("Successfully wrote %d bytes\n", writelen);
-      packetlen = 0;
-			break;
-		}
-	}
-
-	CloseHandle(overlapped_read.hEvent);
-	CloseHandle(overlapped_write.hEvent);
-  CloseHandle(event_read);
-  CloseHandle(event_write);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!doWriting(conn)) {
+      return;
+    }
   }
 }
 
 int main(int argc, char* argv[]) {
- 
+  
   // Input/output buffer
-  #define BUFLEN 1024
-  char buf[BUFLEN];
-  int len;
   std::string guid = "";
   int fd;
  
@@ -279,6 +203,9 @@ int main(int argc, char* argv[]) {
     std::cout << "TAP device not found!" << std::endl;
     return EXIT_FAILURE;
   }
+
+  Connection conn;
+
   std::cout << "guid " << getGuid() << std::endl;
 
   std::string device = std::string(USERMODEDEVICEDIR+guid+TAP_WIN_SUFFIX);
@@ -286,7 +213,7 @@ int main(int argc, char* argv[]) {
 	HANDLE fp= CreateFile(std::wstring(device.begin(), device.end()).c_str(),GENERIC_READ | GENERIC_WRITE,0,
                         NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, NULL);
 
-
+  conn.setDevice(fp);
 	DWORD readlen;
   DWORD code = 1;
 
@@ -302,36 +229,6 @@ int main(int argc, char* argv[]) {
   #define COPYBUFFERSIZE 4096
   BYTE   buffer[COPYBUFFERSIZE] = { 0 };
 
-  event_loop(fp);
-  /*
-  do {
-    overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (ReadFile(fp, buffer, COPYBUFFERSIZE, &bytesRead, &overlapped) == 0) {
-      if (GetLastError() != ERROR_IO_PENDING) {
-				std::cerr << "Readfile fail" << std::endl;
-        return EXIT_FAILURE;
-      }
-			printf("Waiting for read event\n");
-			if (WaitForSingleObject(overlapped.hEvent, INFINITE) != WAIT_OBJECT_0) {
-				std::cerr << "Readfile fail" << std::endl;
-        return EXIT_FAILURE;
-      }
-			printf("Done waiting for read event, getting overlapped status\n");
-      if (GetOverlappedResult(fp, &overlapped, &bytesRead, FALSE) == 0) {
-				std::cerr << "Readfile fail" << std::endl;
-        return EXIT_FAILURE;
-      }
-    }
-    CloseHandle(overlapped.hEvent);
-
-    if (bytesRead > 0) {
-      std::cout << "Read bytes: " << bytesRead << std::endl;
-      FILE *outfp = fopen("output.bin", "wb+");
-      fwrite(buffer, bytesRead, 1, outfp);
-      fclose(outfp);
-    }
-  } while (bytesRead > 0);
-  */
   // Local and destination ip
   const std::string ipLocal = "0.0.0.0";
   const std::string ipRemote = "146.185.175.121";
@@ -379,52 +276,19 @@ int main(int argc, char* argv[]) {
   addr_dst.sin_port = htons(port);
   addr_dst.sin_addr.s_addr = inet_addr(ipRemote.c_str());
 
-  int structLen = sizeof(sockaddr);
 
-  memcpy(buf, "Hello World\0", 12);
+  conn.addr_src = addr_src;
+  conn.addr_dst = addr_dst;
 
-  if (sendto(fd, buf, 12, 0, (struct sockaddr*) &addr_dst, structLen) == SOCKET_ERROR) {
-    std::cerr << "Send failure" << std::endl;
-    return EXIT_FAILURE;
-  }
+  conn.setSocket(fd);
 
-  // Set timeout for waiting for a connection
-  #ifdef _WIN32
-  DWORD dwTime = 1000;
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&dwTime, sizeof(dwTime)) < 0) {
-    std::cerr << "Set timeout failure" << std::endl;
-    return EXIT_FAILURE;
-  }
-  #else
-  struct timeval tv;
-  tv.tv_sec = 1;
-  tv.tv_usec = 0;
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv,sizeof(tv)) < 0) {
-    std::cerr << "Set timeout failure" << std::endl;
-    return EXIT_FAILURE;
-  }
-  #endif
-
-  while(1) {
-    std::cout << "Waiting..." << std::endl;
+  std::thread readThread(syncRead, &conn);
+  std::thread readSocketThread(syncReadSocket, &conn);
+  std::thread writeThread(timer, &conn);
     
-    // Try to receive data, timeout after 1s
-    len = recvfrom(fd, buf, BUFLEN, 0, (sockaddr *)&addr_dst, &structLen);
+  readThread.join();
+  writeThread.join();
+  readSocketThread.join();
 
-    // If data is received, print some info of it
-    if (len > 0) {      
-      std::cout <<  "Received packet from " <<  inet_ntoa(addr_dst.sin_addr) << ":" << ntohs(addr_dst.sin_port) << std::endl;
-      std::cout <<  " " << buf << std::endl;
-    } else {
-      std::cout << "Revc timeout.." << std::endl;
-    }
-    
-    // Send data to the other direction
-    memcpy(buf, "Hello World\0", 12);
-    if (sendto(fd, buf, 12, 0, (struct sockaddr*) &addr_dst, structLen) == SOCKET_ERROR) {
-      std::cerr << "Send failure" << std::endl;
-      return EXIT_FAILURE;
-    }
-  }
   return EXIT_SUCCESS;
 }

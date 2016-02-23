@@ -78,10 +78,12 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\src\connection.h" />
     <ClInclude Include="..\src\wallpuncher.h" />
     <ClInclude Include="..\src\win32_tun.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\src\connection.cpp" />
     <ClCompile Include="..\src\wallpuncher.cpp" />
     <ClCompile Include="..\src\win32_tun.cpp" />
   </ItemGroup>
