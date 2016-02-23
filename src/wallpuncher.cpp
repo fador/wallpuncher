@@ -49,6 +49,7 @@
 #endif
 
 #include <cstdint>
+#include <deque>
 
 #include "win32_tun.h"
 #include "tap-windows.h"
@@ -68,12 +69,12 @@ uint32_t hexToByte(char hex)
 
 #define MATCH_IP(data, ip) (((data)[0] == (ip)[0] && (data)[1] == (ip)[1] && (data)[2] == (ip)[2] && (data)[3] == (ip)[3]))
 
-#define CONNECTIONHEADERS 16
+#define CONNECTIONHEADERS 8
 enum { TYPE_FRAME = 1, TYPE_PING = 2, TYPE_ACK = 3 };
 
 static void syncRead(Connection* conn)
 {
-  #define INPUTBUFLEN 1518
+  #define INPUTBUFLEN 2048
 	char packet[INPUTBUFLEN];
 	DWORD packetlen;
   HANDLE device = conn->getDevice();
@@ -81,7 +82,7 @@ static void syncRead(Connection* conn)
   while (1) {    
     OVERLAPPED overlapped = {0};
 		overlapped.hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-		if (ReadFile(device, packet, sizeof(packet), &packetlen, &overlapped) == 0)
+		if (ReadFile(device, packet, INPUTBUFLEN, &packetlen, &overlapped) == 0)
 		{
       if (GetLastError() != ERROR_IO_PENDING) {
 				return;
@@ -122,48 +123,64 @@ static void syncRead(Connection* conn)
 
 static void syncReadSocket(Connection* conn)
 {
-  #define BUFLEN 1024
+  #define BUFLEN 2048
   char buf[BUFLEN];
+  char *bufptr;
   int len;
   int fd = conn->getSocket();
   int structLen = sizeof(sockaddr);
+  std::deque<uint8_t> inBuf;
 
   while (1) {
     len = recvfrom(fd, buf, BUFLEN, 0, (sockaddr *)&conn->addr_dst, &structLen);
 
     // If data is received, print some info of it
     if (len > 0) {
-      Connection::receivedFrame frame;
-      frame.frame = ntohs(*((uint16_t*)(&buf[1])));
-      switch(buf[0]) {
-        case TYPE_FRAME:
-          printf("Got FRAME %d\n",frame.frame);
-          conn->sendAck(frame.frame);
-          if (frame.frame < conn->getInFrame()) {
-            printf("Old frame..%d < %d\n", frame.frame, conn->getInFrame());
-            continue;
-          }
-          frame.dataLen = ntohs(*((uint16_t*)(&buf[3])));          
-          frame.data = new uint8_t[frame.dataLen];          
-          memcpy(frame.data, &buf[CONNECTIONHEADERS], frame.dataLen);
-          conn->addReceived(frame);
-          
+      
+      inBuf.insert(inBuf.end(), buf, buf+len);
+      while (inBuf.size() >= CONNECTIONHEADERS) {
+        Connection::receivedFrame frame;
+        char temp[4];
+        std::copy(inBuf.begin()+1, inBuf.begin()+5, temp);
+        frame.frame = ntohs(*((uint16_t*)(&temp[0])));
+        frame.dataLen = ntohs(*((uint16_t*)(&temp[2])));
+
+        if(inBuf.size() < CONNECTIONHEADERS+frame.dataLen) { 
+          printf("Waiting for data %d/%d\n", inBuf.size(), CONNECTIONHEADERS+frame.dataLen);
+          continue;
+        }
+
+        switch(inBuf[0]) {
+          case TYPE_FRAME:
+            printf("Got FRAME %d\n",frame.frame);
+            conn->sendAck(frame.frame);
+            if (frame.frame < conn->getInFrame()) {
+              printf("Old frame..%d < %d\n", frame.frame, conn->getInFrame());
+              inBuf.erase(inBuf.begin(), inBuf.begin()+CONNECTIONHEADERS+frame.dataLen);
+              continue;
+            }
+            
+            frame.data = new uint8_t[frame.dataLen];
+            std::copy(inBuf.begin()+CONNECTIONHEADERS, inBuf.begin()+CONNECTIONHEADERS+frame.dataLen, frame.data);
+            //memcpy(frame.data, &inBuf[CONNECTIONHEADERS], frame.dataLen);
+            conn->addReceived(frame);            
+            break;
+          case TYPE_PING:
+            //printf("Got PING\n");
+            conn->ping();
           break;
-        case TYPE_PING:
-          //printf("Got PING\n");
-          conn->ping();
-        break;
-        case TYPE_ACK:
-          conn->ack(frame.frame);
-          printf("Got ACK\n");
-        break;
-        default:
-          printf("Invalid packet of type %d!\n", buf[0]);
-          return;
+          case TYPE_ACK:
+            conn->ack(frame.frame);
+            printf("Got ACK %d\n", frame.frame);
+          break;
+          default:
+            printf("Invalid packet of type %d!\n", inBuf[0]);
+            return;
+        }
+        inBuf.erase(inBuf.begin(), inBuf.begin()+CONNECTIONHEADERS+frame.dataLen);
+
+        //printf("Inbuf len: %d\n", inBuf.size());
       }
-    } else {
-      printf("Recv failed!\n");
-      return;
     }
   }
 }
@@ -177,6 +194,7 @@ static bool doWriting(Connection* conn) {
   std::vector<Connection::sentFrame> toNet;
   std::vector<uint32_t> toAck;
   char buf[CONNECTIONHEADERS];
+  static int lastPing = time(0);
 
   if (conn->established) {
     
@@ -210,12 +228,18 @@ static bool doWriting(Connection* conn) {
 
     conn->resendSent(toNet);
     for (auto frame : toNet) {
-      printf("Sending to net..%d\n", frame.frame);
-      if (sendto(fd, (const char *)frame.data, frame.dataLen, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
+      printf("Sending to net..%d len %d %x %x %x \n", frame.frame, frame.dataLen, frame.data[0], frame.data[1], frame.data[2]);
+      size_t sentLen = sendto(fd, (const char *)frame.data, frame.dataLen, 0, (struct sockaddr*) &conn->addr_dst, structLen);
+      if (sentLen == SOCKET_ERROR) {
         std::cerr << "Send failure" << std::endl;
         return false;
       }
+      if (sentLen < frame.dataLen) {
+        printf("Send failed!!!!\n");
+      }
     }
+
+
     conn->getAcks(toAck);
     for (uint32_t frame : toAck) {
       printf("Sending ACK %d..\n", frame);
@@ -226,17 +250,20 @@ static bool doWriting(Connection* conn) {
         std::cerr << "Send failure" << std::endl;
         return false;
       }
+      printf("ACK sent..\n", frame);
     }
   }
 
-  
-  buf[0] = TYPE_PING;
-  *((uint16_t*)(&buf[1])) = htons(0);
-  *((uint16_t*)(&buf[3])) = htons(0);
-  //Send ping
-  if (sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
-    std::cerr << "Send failure" << std::endl;
-    return false;
+  if (lastPing != time(0)) {
+    buf[0] = TYPE_PING;
+    *((uint16_t*)(&buf[1])) = htons(0);
+    *((uint16_t*)(&buf[3])) = htons(0);
+    //Send ping
+    if (sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
+      std::cerr << "Send failure" << std::endl;
+      return false;
+    }
+    lastPing = time(0);
   }
 
   return true;
@@ -244,7 +271,7 @@ static bool doWriting(Connection* conn) {
 
 static void timer(Connection* conn) {
   while (1) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
     if (!doWriting(conn)) {
       return;
     }
@@ -395,19 +422,23 @@ int main(int argc, char* argv[]) {
   addr_dst.sin_port = htons(portOut);
   addr_dst.sin_addr.s_addr = inet_addr(ipRemote.c_str());
 
-
-
-  
-  COMMTIMEOUTS cto;
-  SecureZeroMemory(&cto, sizeof(COMMTIMEOUTS));
-  // Set the new timeouts
-  cto.ReadIntervalTimeout = MAXDWORD;
-  cto.ReadTotalTimeoutConstant = 0;
-  cto.ReadTotalTimeoutMultiplier = 0;
-  if (!SetCommTimeouts(fp, &cto)) {
-    std::cout << "SetCommTimeouts failed!" << std::endl;
+  /*
+  #ifdef _WIN32
+  DWORD dwTime = 1000;
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&dwTime, sizeof(dwTime)) < 0) {
+    std::cerr << "Set timeout failure" << std::endl;
+    return EXIT_FAILURE;
   }
-
+  #else
+  struct timeval tv;
+  tv.tv_sec = 1;
+  tv.tv_usec = 0;
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv,sizeof(tv)) < 0) {
+    std::cerr << "Set timeout failure" << std::endl;
+    return EXIT_FAILURE;
+  }
+  #endif
+  */
   conn.addr_src = addr_src;
   conn.addr_dst = addr_dst;
 
