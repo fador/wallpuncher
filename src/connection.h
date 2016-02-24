@@ -37,12 +37,18 @@ class Connection {
 
 
 public:
-  Connection() :inFrame(0), outFrame(0), established(false) {};
+  Connection() :inFrame(0), outFrame(0), established(false), verbose(false),lastPing(std::chrono::steady_clock::now()) {};
 
   Connection(const Connection &obj) {};
 
   typedef struct { uint32_t frame; uint8_t* data; uint32_t dataLen; std::chrono::steady_clock::time_point sent; } sentFrame;
   typedef struct { uint32_t frame; uint8_t* data; uint32_t dataLen; } receivedFrame;
+
+  void init() {
+    inFrame = 0;
+    outFrame = 0;
+    established = false;    
+  }
 
   bool addReceived(Connection::receivedFrame& newFrame) {
     std::unique_lock<std::mutex> inputLock(inputMutex);
@@ -167,10 +173,21 @@ public:
   void ping() {
     if (!established) std::cerr << "Connection established!!" << std::endl;
     established = true;
+    lastPing = std::chrono::steady_clock::now();
   }
 
 
   bool established;
+
+  bool verbose;
+
+  uint32_t sentToLocal;
+  uint32_t sentToNet;
+
+  uint32_t receivedFromNet;
+  uint32_t receivedFromLocal;
+
+  std::chrono::steady_clock::time_point lastPing;
 
 private:
 

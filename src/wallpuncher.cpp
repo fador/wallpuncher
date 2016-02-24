@@ -96,14 +96,6 @@ static void syncRead(Connection* conn)
 		}
 		CloseHandle(overlapped.hEvent);
 
-
-	  //printf("Reading one packet\n");
-    /*
-    if (ReadFile(device, packet, INPUTBUFLEN, &packetlen, NULL) == 0) {
-      printf("Error reading packet!");
-      return;
-    }*/
-    //printf("Done reading packet\n");
     if (conn->established && packetlen) {
       Connection::sentFrame frame;
       frame.data = new uint8_t[packetlen+CONNECTIONHEADERS];
@@ -111,8 +103,8 @@ static void syncRead(Connection* conn)
       frame.frame = conn->getIncOutFrame();
 	  
       frame.data[0] = TYPE_FRAME;
-      *((uint16_t*)(&frame.data[1])) = htons(frame.frame);
-      *((uint16_t*)(&frame.data[3])) = htons(packetlen);
+      *((uint32_t*)(&frame.data[1])) = htonl(frame.frame);
+      *((uint16_t*)(&frame.data[5])) = htons(packetlen);
 
       memcpy(&frame.data[CONNECTIONHEADERS], packet, packetlen);
       conn->addSent(frame);
@@ -140,29 +132,31 @@ static void syncReadSocket(Connection* conn)
       inBuf.insert(inBuf.end(), buf, buf+len);
       while (inBuf.size() >= CONNECTIONHEADERS) {
         Connection::receivedFrame frame;
-        char temp[4];
-        std::copy(inBuf.begin()+1, inBuf.begin()+5, temp);
-        frame.frame = ntohs(*((uint16_t*)(&temp[0])));
-        frame.dataLen = ntohs(*((uint16_t*)(&temp[2])));
+        char temp[6];
+        std::copy(inBuf.begin()+1, inBuf.begin()+7, temp);
+        frame.frame = ntohl(*((uint32_t*)(&temp[0])));
+        frame.dataLen = ntohs(*((uint16_t*)(&temp[4])));
 
         if(inBuf.size() < CONNECTIONHEADERS+frame.dataLen) { 
-          printf("Waiting for data %d/%d\n", inBuf.size(), CONNECTIONHEADERS+frame.dataLen);
+          if (conn->verbose)
+            printf("Waiting for data %d/%d\n", inBuf.size(), CONNECTIONHEADERS+frame.dataLen);
           continue;
         }
 
         switch(inBuf[0]) {
           case TYPE_FRAME:
-            printf("Got FRAME %d\n",frame.frame);
+            if (conn->verbose)
+              printf("Got FRAME %d\n",frame.frame);
             conn->sendAck(frame.frame);
             if (frame.frame < conn->getInFrame()) {
-              printf("Old frame..%d < %d\n", frame.frame, conn->getInFrame());
+              if (conn->verbose)
+                printf("Old frame..%d < %d\n", frame.frame, conn->getInFrame());
               inBuf.erase(inBuf.begin(), inBuf.begin()+CONNECTIONHEADERS+frame.dataLen);
               continue;
             }
             
             frame.data = new uint8_t[frame.dataLen];
             std::copy(inBuf.begin()+CONNECTIONHEADERS, inBuf.begin()+CONNECTIONHEADERS+frame.dataLen, frame.data);
-            //memcpy(frame.data, &inBuf[CONNECTIONHEADERS], frame.dataLen);
             conn->addReceived(frame);            
             break;
           case TYPE_PING:
@@ -171,7 +165,8 @@ static void syncReadSocket(Connection* conn)
           break;
           case TYPE_ACK:
             conn->ack(frame.frame);
-            printf("Got ACK %d\n", frame.frame);
+            if (conn->verbose)
+              printf("Got ACK %d\n", frame.frame);
           break;
           default:
             printf("Invalid packet of type %d!\n", inBuf[0]);
@@ -196,7 +191,8 @@ static bool doWritingLocal(Connection* conn) {
     conn->sendReceivedToLocal(toLocalNet);
     for (auto frame : toLocalNet) {
       DWORD out;
-      printf("Writing to local net..%d\n", frame.dataLen);
+      if (conn->verbose)
+        printf("Writing to local net..%d\n", frame.dataLen);
       /*
 	    if (WriteFile(device, frame.data, frame.dataLen, &writelen, NULL) == 0) {
         printf("Error writing a packet!");
@@ -217,7 +213,8 @@ static bool doWritingLocal(Connection* conn) {
 		  CloseHandle(overlapped.hEvent);
 
       delete []frame.data;
-      printf("Written to local net %d\n", writelen);
+      if (conn->verbose)
+        printf("Written to local net %d\n", writelen);
     }    
   }
 
@@ -231,13 +228,15 @@ static bool doWriting(Connection* conn) {
   std::vector<uint32_t> toAck;
   char buf[CONNECTIONHEADERS];
   static int lastPing = time(0);
+  static uint32_t timer = 0;
 
   if (conn->established) {
    
 
     conn->resendSent(toNet);
     for (auto frame : toNet) {
-      printf("Sending to net..%d len %d %x %x %x \n", frame.frame, frame.dataLen, frame.data[0], frame.data[1], frame.data[2]);
+      if (conn->verbose)
+        printf("Sending to net..%d len %d %x %x %x \n", frame.frame, frame.dataLen, frame.data[0], frame.data[1], frame.data[2]);
       size_t sentLen = sendto(fd, (const char *)frame.data, frame.dataLen, 0, (struct sockaddr*) &conn->addr_dst, structLen);
       if (sentLen == SOCKET_ERROR) {
         std::cerr << "Send failure" << std::endl;
@@ -251,10 +250,11 @@ static bool doWriting(Connection* conn) {
 
     conn->getAcks(toAck);
     for (uint32_t frame : toAck) {
-      printf("Sending ACK %d..\n", frame);
+      if (conn->verbose)
+        printf("Sending ACK %d..\n", frame);
       buf[0] = TYPE_ACK;
-      *((uint16_t*)(&buf[1])) = htons(frame);
-      *((uint16_t*)(&buf[3])) = htons(0);
+      *((uint32_t*)(&buf[1])) = htonl(frame);
+      *((uint16_t*)(&buf[5])) = htons(0);
       size_t sentLen = sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen);
       if (sentLen == SOCKET_ERROR) {
         std::cerr << "Send failure" << std::endl;
@@ -263,21 +263,30 @@ static bool doWriting(Connection* conn) {
       if (sentLen < CONNECTIONHEADERS) {
         printf("Send failed (ACK)!!!!\n");
       }
-      printf("ACK sent..\n", frame);
+      if (conn->verbose)
+        printf("ACK sent..\n", frame);
     }
   }
 
   // Ping once a second
   if (lastPing != time(0)) {
     buf[0] = TYPE_PING;
-    *((uint16_t*)(&buf[1])) = htons(0);
-    *((uint16_t*)(&buf[3])) = htons(0);
+    *((uint32_t*)(&buf[1])) = htonl(0);
+    *((uint16_t*)(&buf[5])) = htons(0);
     //Send ping
     if (sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
       std::cerr << "Send failure" << std::endl;
       return false;
     }
     lastPing = time(0);
+
+    // Check incoming pings, 10s timeout
+    if (conn->established) {
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() - conn->lastPing).count() > 10.000) {
+        std::cerr << "Connection lost, ping timeout" << std::endl;
+        conn->init();
+      }
+    }
   }
 
   return true;
@@ -288,13 +297,13 @@ static void timer(Connection* conn) {
 
   std::thread netThread = std::thread([&] {
     while (!done) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
       if (!doWriting(conn)) {
         done = true;
       }} });
   std::thread localThread = std::thread([&] {
     while (!done) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
       if (!doWritingLocal(conn)) {
         done = true;
       }} });
@@ -324,6 +333,7 @@ int main(int argc, char* argv[]) {
   int portOut = 0;
   int portIn = 0;
   DWORD localIp = 0;
+  Connection conn;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -361,9 +371,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "--local-ip option requires one argument." << std::endl;
         return EXIT_FAILURE;
       }  
+    } else if ((arg == "-v") || (arg == "--verbose")) {
+      conn.verbose = true;
     }
-
-    
   }
 
   if (portOut == 0 || portIn == 0 || ipRemote == "") {
@@ -384,7 +394,7 @@ int main(int argc, char* argv[]) {
     return EXIT_FAILURE;
   }
 
-  Connection conn;
+
 
   std::cout << "guid " << getGuid() << std::endl;
 
