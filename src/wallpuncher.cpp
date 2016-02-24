@@ -185,16 +185,11 @@ static void syncReadSocket(Connection* conn)
   }
 }
 
-static bool doWriting(Connection* conn) {
+
+static bool doWritingLocal(Connection* conn) {
   HANDLE device = conn->getDevice();
-  int fd = conn->getSocket();
   DWORD writelen;
-  int structLen = sizeof(sockaddr);
   std::vector<Connection::receivedFrame> toLocalNet;
-  std::vector<Connection::sentFrame> toNet;
-  std::vector<uint32_t> toAck;
-  char buf[CONNECTIONHEADERS];
-  static int lastPing = time(0);
 
   if (conn->established) {
     
@@ -223,8 +218,22 @@ static bool doWriting(Connection* conn) {
 
       delete []frame.data;
       printf("Written to local net %d\n", writelen);
-    }
-    
+    }    
+  }
+
+  return true;
+}
+
+static bool doWriting(Connection* conn) {
+  int fd = conn->getSocket();
+  int structLen = sizeof(sockaddr);
+  std::vector<Connection::sentFrame> toNet;
+  std::vector<uint32_t> toAck;
+  char buf[CONNECTIONHEADERS];
+  static int lastPing = time(0);
+
+  if (conn->established) {
+   
 
     conn->resendSent(toNet);
     for (auto frame : toNet) {
@@ -246,14 +255,19 @@ static bool doWriting(Connection* conn) {
       buf[0] = TYPE_ACK;
       *((uint16_t*)(&buf[1])) = htons(frame);
       *((uint16_t*)(&buf[3])) = htons(0);
-      if (sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen) == SOCKET_ERROR) {
+      size_t sentLen = sendto(fd, (const char *)buf, CONNECTIONHEADERS, 0, (struct sockaddr*) &conn->addr_dst, structLen);
+      if (sentLen == SOCKET_ERROR) {
         std::cerr << "Send failure" << std::endl;
         return false;
+      }
+      if (sentLen < CONNECTIONHEADERS) {
+        printf("Send failed (ACK)!!!!\n");
       }
       printf("ACK sent..\n", frame);
     }
   }
 
+  // Ping once a second
   if (lastPing != time(0)) {
     buf[0] = TYPE_PING;
     *((uint16_t*)(&buf[1])) = htons(0);
@@ -270,12 +284,23 @@ static bool doWriting(Connection* conn) {
 }
 
 static void timer(Connection* conn) {
-  while (1) {
+  bool done = false;
+
+  std::thread netThread = std::thread([&] {
+    while (!done) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    if (!doWriting(conn)) {
-      return;
-    }
-  }
+      if (!doWriting(conn)) {
+        done = true;
+      }} });
+  std::thread localThread = std::thread([&] {
+    while (!done) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      if (!doWritingLocal(conn)) {
+        done = true;
+      }} });
+
+  netThread.join();
+  localThread.join();
 }
 
 
