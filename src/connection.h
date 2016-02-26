@@ -54,6 +54,7 @@ public:
     std::unique_lock<std::mutex> inputLock(inputMutex);
     int i;
 
+    // Check if the frame already exists and remove if it does
     for (i = 0; i < receivedFrames.size(); i++) {
       if (receivedFrames[i].frame == newFrame.frame) {
         delete [] newFrame.data;
@@ -61,6 +62,7 @@ public:
       }
     }
 
+    // Arrange in frame order
     for (i = 0; i < receivedFrames.size(); i++) {
       if (receivedFrames[i].frame > newFrame.frame) {
         break;
@@ -79,9 +81,11 @@ public:
     std::unique_lock<std::mutex> outputLock(outputMutex);
     int i;
 
+    // Don't add duplicate frames (should not be posssible)
     for (i = 0; i < sentFrames.size(); i++) {
       if (sentFrames[i].frame == newFrame.frame) {
-        break;
+        delete [] newFrame.data;
+        return true;
       }
     }
 
@@ -94,6 +98,7 @@ public:
     std::unique_lock<std::mutex> outputLock(outputMutex);
     int i;
 
+    // We got an ack from the network, we can remove the associated frame
     for (i = 0; i < sentFrames.size(); i++) {
       if (sentFrames[i].frame == frame) {
         sentFrames.erase(sentFrames.begin()+i);
@@ -106,6 +111,7 @@ public:
 
   bool sendAck(uint32_t frame) {
     std::unique_lock<std::mutex> outputLock(ackMutex);
+    // Add an ack to send
     toAck.push_back(frame);
 
     return false;
@@ -113,6 +119,7 @@ public:
 
   bool getAcks(std::vector<uint32_t> &ackOut) {
     std::unique_lock<std::mutex> outputLock(ackMutex);
+    // Just grab all the acks to push to the network
     for (uint32_t ack : toAck) {
       ackOut.push_back(ack);
     }
@@ -125,6 +132,7 @@ public:
     std::unique_lock<std::mutex> inputLock(inputMutex);
     int toRemove = 0;
 
+    // Just to make sure packets are sent to the local network in the order they were read in the other network
     for (int i = 0; i < receivedFrames.size(); i++) {
       if (receivedFrames[i].frame != inFrame) {
         break;
@@ -133,8 +141,9 @@ public:
       toRemove ++;
       inFrame ++;
     }
-
-    receivedFrames.erase(receivedFrames.begin(), receivedFrames.begin() + toRemove);
+    if (toRemove) {
+      receivedFrames.erase(receivedFrames.begin(), receivedFrames.begin() + toRemove);
+    }
 
     return true;
   }
@@ -142,9 +151,13 @@ public:
 
   bool resendSent(std::vector<Connection::sentFrame> &toNet) {
     std::unique_lock<std::mutex> outputLock(outputMutex);
+
+    // Grab a list of frames to be sent to the network
     for (auto &frame : sentFrames) {
+      // Send again in 200ms intervals until we get ack
       if (std::chrono::duration<double>(std::chrono::steady_clock::now() - frame.sent).count() > 0.200) {
         toNet.push_back(frame);
+        // Update sent time
         frame.sent = std::chrono::steady_clock::now();
       }
     }
@@ -163,6 +176,7 @@ public:
   sockaddr_in addr_dst;
 
   uint32_t getIncOutFrame() {
+    std::unique_lock<std::mutex> outputLock(outputMutex);
     return outFrame++;
   }
 
@@ -170,7 +184,8 @@ public:
     return inFrame;
   }
 
-  void ping() {
+  // Received ping, set connection activate state and update last ping time
+  void ping() {    
     if (!established) std::cerr << "Connection established!!" << std::endl;
     established = true;
     lastPing = std::chrono::steady_clock::now();
