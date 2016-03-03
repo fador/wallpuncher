@@ -324,6 +324,7 @@ int main(int argc, char* argv[]) {
   int portOut = 0;
   int portIn = 0;
   DWORD localIp = 0;
+  std::string localIpStr;
   Connection conn;
 
   for (int i = 1; i < argc; ++i) {
@@ -354,9 +355,19 @@ int main(int argc, char* argv[]) {
       }  
     } else if ((arg == "-l") || (arg == "--local-ip")) {
       if (i + 1 < argc) {
-        std::string ip = argv[++i];
-        for (int ii = 0; ii < 4; ii++) {
-          localIp |= ((hexToByte(ip[ii*2])<<4)+hexToByte(ip[ii*2+1]))<<(8*(3-ii));
+        localIpStr = argv[++i];
+        rsize_t strmax = localIpStr.size();
+        const char *delim = ".";
+        char *next_token;
+        char* token = strtok_s((char *)localIpStr.c_str(), delim, &next_token);
+        int tokens = 0;
+        while(token) {
+          localIp |= atoi(token)<<(tokens++)*8;
+          token = strtok_s(NULL, delim, &next_token);
+        }
+        if (tokens != 4) {
+          std::cerr << "--local-ip option requires an ip (e.g. 10.3.0.5)." << std::endl;
+          return EXIT_FAILURE;
         }
       } else {
         std::cerr << "--local-ip option requires one argument." << std::endl;
